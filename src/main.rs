@@ -1,4 +1,4 @@
-//use std::collections::HashMap;
+use std::collections::HashMap;
 use std::fmt::{self, Display};
 use std::fs;
 use std::iter::Iterator;
@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use anyhow::Result;
-use md5;
+use md5::{self, Digest};
 use rayon::prelude::*;
 use structopt::StructOpt;
 use walkdir::WalkDir;
@@ -27,19 +27,13 @@ impl Directory {
         for entry in fs::read_dir(&path)? { 
             let entry = entry?;
             if entry.file_type()?.is_dir() {
-                dirs.push(entry.path());
+                dirs.push(entry.path().canonicalize()?);
             } else if entry.file_type()?.is_file() {
-                files.push(entry.path());
+                files.push(entry.path().canonicalize()?);
             }  /* ignore links for now */
 		}
         Ok(Directory { path, files, dirs })
     }
-	fn file_hashes(&self) -> Vec<String> {
-		self.files.par_iter()
-			.map(|f| md5::compute(&fs::read(f).unwrap()))
-            .map(|digest| format!("{:?}", digest))
-			.collect::<Vec<String>>()
-	}
     fn is_empty(&self) -> bool {
         self.files.is_empty() && self.dirs.is_empty()
     }
@@ -91,18 +85,24 @@ impl DirTree {
             .map(|d| d.path.clone())
             .collect()
     }
-}
-
-/*
-impl Iterator for DirTree {
-    type Item = Directory;
-    fn next(&mut self) -> Option<Self::Item> {
-        let d = self.dirs.iter().next();
-        match d {
-            Some(d) => 
+    fn hash_dict(&self) -> HashMap<Digest, Vec<PathBuf>> {
+		let mut hash_dict: HashMap<Digest, Vec<PathBuf>> = HashMap::new();
+        let files: Vec<PathBuf> = self.files();
+		let hashes: Vec<Digest> = files.par_iter()
+            .map(|f| 
+                md5::compute(&fs::read(f).unwrap())
+            ).collect();
+        for (h, p) in hashes.iter().zip(files.iter()) {
+            match hash_dict.get_mut(&h) {
+                Some(x) => x.push(p.clone()),
+                None => {
+                    hash_dict.insert(*h, vec![p.clone()]);
+                },
+            }
+        }
+		hash_dict
     }
 }
-*/
 
 
 fn all_files1(root: impl AsRef<Path>) -> Vec<PathBuf> {
@@ -156,7 +156,18 @@ fn all_files2(root: PathBuf) -> Result<Vec<PathBuf>> {
 
 fn all_files3(root: PathBuf) -> Result<Vec<PathBuf>> {
     let dt = DirTree::read(root)?;
-    println!("{} empty", dt.empty_dirs().len());
+    for d in dt.empty_dirs().iter() {
+        println!("EMPTY: {}", d.display());
+    }
+    let hd = dt.hash_dict();
+    println!("hashes: {:?}", hd.len());
+    for v in hd.values() {
+        if v.len() > 1 {
+            println!("{:?}", v);
+        }
+    }
+    //println!("duplications: {:?}", dupes);
+
     Ok(dt.files())
 }
 
@@ -189,13 +200,6 @@ struct Opt {
     paths: Vec<PathBuf>,
 }
 
-
-fn md5_sum(path: impl AsRef<Path>) -> String {
-    match fs::read(path) {
-        Ok(b) => format!("{:?}", md5::compute(&b)),
-        Err(_) => String::default(),
-    }
-}
 
 
 fn main() -> Result<()> {
